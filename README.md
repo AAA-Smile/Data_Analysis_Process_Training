@@ -1,5 +1,8 @@
-# 先将需要分析的表格使用MySQL构建起来
+# 数分练习
+
+## 先将需要分析的表格使用MySQL构建起来
 编写一个SQL脚本运行，其中包含建表，插入数据，查询操作，构建三合一表格等相关操作；主要涉及到普通查询，窗口函数查询等
+
 ## 数据库以及表的构建
 1、构建demo数据库
 
@@ -14,7 +17,7 @@
 
 5、接下来我们模拟插入些数据进去，用户表10行，商品表8行，订单表66行
 ## 查询操作
-1、按周统计GMV，订单数，客单价
+**1、按周统计GMV，订单数，客单价**
 
 **%x-%v**它遵循的是**ISO 8601标准**，也就是**以周一作为一周的开始**，表示第几年的第几周
 ```MySQL
@@ -28,7 +31,7 @@ where status = 'paid'
 group by date_format(order_time , '%x-%v')
 order by month 
 ```
-2、按月统计GMV，订单数，客单价
+**2、按月统计GMV，订单数，客单价**
 ```MySQL
 select 
 	date_format(order_time , '%Y-%m') as month , 
@@ -40,7 +43,7 @@ where status = 'paid'
 group by date_format(order_time , '%Y-%m')
 order by month 
 ```
-3、按品类/渠道/地区分组对比
+**3、按品类/渠道/地区分组对比 GMV，订单数，客单价**
 
 （1）按品类
 
@@ -50,18 +53,168 @@ select
 	p.category , 
 	round(sum(o.amount) , 2) as gmv , 
 	count(distinct o.order_id) as order_cnt , 
-	round(sum(o.amount) / distinct o.order_id , 2) as avg_order_value
+	round(sum(o.amount) / count(distinct o.order_id) , 2) as avg_order_value
 from order as o 
 join products as p 
-on o.product_id == p.product_id 
+on o.product_id = p.product_id 
 where o.status = 'paid'
 group by p.category
 order by gmv desc 
 ```
 （2）按渠道
 ```MySQL
-
+select 
+	channel , 
+	round(sum(amount) , 2) as gmv , 
+	count(distinct order_id) as order_cnt , 
+	round(sum(amount) / count(distinct order_id) , 2) as avg_order_value 
+from order
+where status = 'paid'
+group by channel
+order by gmv desc 
 ```
+（3）按地区
+```MySQL
+select 
+	u.region , 
+	round(sum(amount) , 2) as gmv ,
+	count(distinct o.order_id) as order_cnt , 
+	round(sum(amount) / count(distinct o.order_id) , 2) as avg_order_value
+from orders as o
+join users as u 
+on o.user_id = u.user_id
+where o.status = 'paid'
+group by u.region
+order by gmv desc 
+```
+
+**4、窗口函数：按月环比、同比**
+
+`WITH ... AS` 叫 **CTE（Common Table Expression，公共表表达式）**，中文常叫“**公用表表达式**”或“**临时结果集**”。
+
+**它给一段查询结果起个名字，让后面的 SQL 可以像用表一样用它**
+
+`LAG(gmv) OVER (ORDER BY month)` —— 取“上一行”的 GMV
+
+	ORDER BY month 先按照月份升序排好
+	
+	LAG(gmv) 对每一行，往上找 1 行，把那一行的 gmv 拿过来，作为 prev_month_gmv
+
+	默认偏移量是 1，等价于 LAG(gmv, 1)
+
+`LAG(gmv, 12) OVER (ORDER BY month)` —— 取“往上数 12 行”的 GMV
+
+	相当于是去年该月的GMV，不过这个严重依赖连续月份
+
+**同比环比计算公式**
+
+$$
+环比公式=（本月 GMV−上月 GMV）/上月 GMV​×100%
+$$
+
+$$
+同比公式 = （本月GMV - 去年同月GMV）/去年同月GMV × 100%
+$$
+
+```MySQL
+with monthly as (
+	SELECT  
+    DATE_FORMAT(order_time, '%Y-%m') AS month,  
+    SUM(amount) AS gmv,  
+    COUNT(DISTINCT order_id) AS order_cnt  
+	FROM orders  
+	WHERE status = 'paid'  
+	GROUP BY DATE_FORMAT(order_time, '%Y-%m')
+) , 
+with_lag as (
+	select 
+		month , 
+		gmv , 
+		order_cnt , 
+		lag(gmv) over (order by month) as prev_month_gmv , 
+		lag(gmv , 12) over (order by month) as last_year_gmv 
+	from monthly
+)
+select 
+	month , 
+	gmv , 
+	prev_month_gmv , 
+	round((gmv - prev_month_gmv) * 100.0 / nullif(prev_month_gmv , 0) , 2) as mom_pct , 
+	last_year_gmv , 
+	round((gmv - last_yaer_gmv) * 100.0 / nullif(last_yaer_gmv , 0) , 2) as yoy_pct 
+from with_lag
+order by month 
+```
+
+**5、多表JOIN出’用户-订单-商品‘宽表**
+
+主要包含字段为：订单id，下单时间，下单状态，下单渠道，用户id，用户名称，用户地区，商品id，商品名称，商品类别，商品单价，购买商品数量，成交金额，购买商品平均单价
+
+```MySQL
+select 
+	o.order_id,  
+	o.order_time,  
+	o.status,  
+	o.channel,  
+	u.user_id,  
+	u.user_name,  
+	u.region,  
+	p.product_id,  
+	p.product_name,  
+	p.category,  
+	p.price,  
+	o.quantity,  
+	o.amount,
+	ROUND(o.amount / NULLIF(o.quantity, 0), 2) AS unit_price
+from orders as o 
+join users as u
+on o.user_id = u.user_id 
+join products as p 
+on o.product_id = p.product_id 
+order by o.order_time
+```
+
+**6、将分析宽表固化且只保留paid订单**
+```MySQL
+CREATE TABLE dw_order_wide AS 
+SELECT
+	o.order_id,  
+	o.order_time,  
+	DATE_FORMAT(o.order_time, '%Y-%m') AS month,  
+	DATE_FORMAT(o.order_time, '%x-%v') AS year_week,  
+	u.user_id,  
+	u.region,  
+	o.channel,  
+	p.product_id,  
+	p.category,  
+	o.quantity,  
+	o.amount
+FROM orders o  
+JOIN users u    ON o.user_id = u.user_id  
+JOIN products p ON o.product_id = p.product_id  
+WHERE o.status = 'paid';
+```
+这时候你就可以在数据库demo中发现一个新的分析宽表，包含的字段就是SELECT语句中提到的那些
+
+可以利用查询函数简单验证一下
+```MySQL
+SELECT * FROM dw_order_wide ORDER BY order_time LIMIT 10;
+```
+
+**7、基于宽表的分析：品类×地区 GMV**
+```MySQL
+select 
+	region , 
+	category , 
+	round(sum(amount) , 2) as gmv , 
+	count(distinct order_id) as order_cnt 
+from dw_order_wide 
+group by region , category
+order by region , gmv desc 
+```
+
+
+
 
 
 
