@@ -40,7 +40,32 @@ where status = 'paid'
 group by date_format(order_time , '%Y-%m')
 order by month 
 ```
-3、
+3、按品类/渠道/地区分组对比
+
+（1）按品类
+
+使用JOIN时，没有前缀默认是INNER JOIN内连接，只保留两张表内公有的元素
+```MySQL
+select 
+	p.category , 
+	round(sum(o.amount) , 2) as gmv , 
+	count(distinct o.order_id) as order_cnt , 
+	round(sum(o.amount) / distinct o.order_id , 2) as avg_order_value
+from order as o 
+join products as p 
+on o.product_id == p.product_id 
+where o.status = 'paid'
+group by p.category
+order by gmv desc 
+```
+（2）按渠道
+```MySQL
+
+```
+
+
+
+
 
 
 
