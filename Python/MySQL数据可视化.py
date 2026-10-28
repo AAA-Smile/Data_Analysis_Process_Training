@@ -42,16 +42,26 @@ plt.show()
 
 # ---------- 图2：周内分布 ----------
 df_dow = pd.read_sql("""
-SELECT DAYOFWEEK(order_time) AS dow_num,
-       CASE DAYOFWEEK(order_time)
-         WHEN 1 THEN '周日' WHEN 2 THEN '周一' WHEN 3 THEN '周二'
-         WHEN 4 THEN '周三' WHEN 5 THEN '周四' WHEN 6 THEN '周五'
-         WHEN 7 THEN '周六' END AS dow_name,
-       COUNT(DISTINCT order_id) AS order_cnt,
-       SUM(amount) AS gmv,
-       SUM(amount)/COUNT(DISTINCT order_id) AS aov
-FROM dw_order_wide
-GROUP BY DAYOFWEEK(order_time)
+WITH t AS (
+    SELECT
+        DAYOFWEEK(order_time) AS dow_num,
+        CASE DAYOFWEEK(order_time)
+            WHEN 1 THEN '周日' WHEN 2 THEN '周一' WHEN 3 THEN '周二'
+            WHEN 4 THEN '周三' WHEN 5 THEN '周四' WHEN 6 THEN '周五'
+            WHEN 7 THEN '周六'
+        END AS dow_name,
+        order_id,
+        amount
+    FROM dw_order_wide
+)
+SELECT
+    dow_num,
+    dow_name,
+    COUNT(DISTINCT order_id) AS order_cnt,
+    SUM(amount) AS gmv,
+    SUM(amount) / COUNT(DISTINCT order_id) AS aov
+FROM t
+GROUP BY dow_num, dow_name
 ORDER BY dow_num
 """, engine)
 
