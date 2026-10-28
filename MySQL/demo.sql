@@ -300,3 +300,63 @@ SELECT
 FROM dw_order_wide
 GROUP BY region, category
 ORDER BY region, gmv DESC;
+
+-- 基于宽表的分析：用户贡献集中度
+WITH user_gmv AS (
+    SELECT
+        user_id,
+        ROUND(SUM(amount), 2) AS gmv,
+        COUNT(DISTINCT order_id) AS order_cnt
+    FROM dw_order_wide
+    GROUP BY user_id
+)
+SELECT
+    user_id,
+    gmv,
+    order_cnt,
+    ROUND(gmv * 100.0 / SUM(gmv) OVER (), 2) AS gmv_pct,
+    ROUND(SUM(gmv) OVER (ORDER BY gmv DESC) * 100.0 / SUM(gmv) OVER (), 2) AS cum_pct,
+    ROW_NUMBER() OVER (ORDER BY gmv DESC) AS rn
+FROM user_gmv
+ORDER BY gmv DESC;
+
+-- 周内分布
+SELECT
+    DAYOFWEEK(order_time) AS dow_num,
+    CASE DAYOFWEEK(order_time)
+        WHEN 1 THEN '周日' WHEN 2 THEN '周一' WHEN 3 THEN '周二'
+        WHEN 4 THEN '周三' WHEN 5 THEN '周四' WHEN 6 THEN '周五'
+        WHEN 7 THEN '周六'
+    END AS dow_name,
+    COUNT(DISTINCT order_id) AS order_cnt,
+    ROUND(SUM(amount), 2) AS gmv,
+    ROUND(SUM(amount) / COUNT(DISTINCT order_id), 2) AS aov
+FROM dw_order_wide
+GROUP BY
+    DAYOFWEEK(order_time) ,
+    CASE DAYOFWEEK(order_time)
+        WHEN 1 THEN '周日' WHEN 2 THEN '周一' WHEN 3 THEN '周二'
+        WHEN 4 THEN '周三' WHEN 5 THEN '周四' WHEN 6 THEN '周五'
+        WHEN 7 THEN '周六'
+    END
+ORDER BY dow_num;
+
+-- 地区品类交叉
+WITH t AS (
+    SELECT
+        region,
+        category,
+        ROUND(SUM(amount), 2) AS gmv,
+        COUNT(DISTINCT order_id) AS order_cnt
+    FROM dw_order_wide
+    GROUP BY region, category
+)
+SELECT
+    region,
+    category,
+    gmv,
+    order_cnt,
+    ROUND(gmv * 100.0 / SUM(gmv) OVER (PARTITION BY region), 2) AS pct_in_region,
+    ROUND(gmv * 100.0 / SUM(gmv) OVER (PARTITION BY category), 2) AS pct_in_category
+FROM t
+ORDER BY region, gmv DESC;

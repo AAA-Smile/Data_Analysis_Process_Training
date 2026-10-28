@@ -3,7 +3,7 @@
 ## 先将需要分析的表格使用MySQL构建起来
 编写一个SQL脚本运行，其中包含建表，插入数据，查询操作，构建三合一表格等相关操作；主要涉及到普通查询，窗口函数查询等
 
-## 数据库以及表的构建
+## 一、数据库以及表的构建
 1、构建demo数据库
 
 2、使用demo数据库
@@ -16,7 +16,7 @@
 	3. orders订单表：包含字段为订单id，下单用户id，下单商品id，购买数量，成交金额，下单渠道，订单状态（**在计算GMV时只考虑已付款的情况（已取消、已退款不计算在内）**），下单时间
 
 5、接下来我们模拟插入些数据进去，用户表10行，商品表8行，订单表66行
-## 查询操作
+## 二、查询操作
 **1、按周统计GMV，订单数，客单价**
 
 **%x-%v**它遵循的是**ISO 8601标准**，也就是**以周一作为一周的开始**，表示第几年的第几周
@@ -201,7 +201,9 @@ WHERE o.status = 'paid';
 SELECT * FROM dw_order_wide ORDER BY order_time LIMIT 10;
 ```
 
-**7、基于宽表的分析：品类×地区 GMV**
+**7、基于宽表的分析，这里我简单选择几个维度进行描述性分析**
+
+（1）品类×地区 GMV
 ```MySQL
 select 
 	region , 
@@ -213,6 +215,45 @@ group by region , category
 order by region , gmv desc 
 ```
 
+（2）用户贡献集中度
+
+帕累托分析，主要分析方式就是计算各个用户贡献的GMV占比情况，根据总占比大于80%时的人数判断GMV贡献是否过于集中
+
+- **sum(gmv) over()** 目的是计算全表的GMV总和，每一行的都是一个结果，通过计算这个再将每行的GMV作为除数计算每行GMV占比
+- **sum(gmv) over (order by gmv desc)** 先将GMV排序，随后计算第一行累加到该行的GMV总和，这是为了计算前n行的GMV之和占全GMV之和的百分比，作为帕累托分析的核心依据
+- **row_number() over (order by gmv desc)** 是将GMV从大到小排序，从1开始依此编号，值得注意的是即使两行数值相同编号也不会相同
+
+```MySQL
+with user_gmv as (
+	select 
+		user_id ,
+		round(sum(amount) , 2) as gmv , 
+		count(distinct user_id) as order_cnt 
+	from dw_order_wide 
+	group by user_id 
+)
+select 
+	user_id , 
+	gmv , 
+	order_cnt , 
+	round(gmv * 100.0 / sum(gmv) over() , 2) as gmv_cnt ,
+	round(sum(gmv) over (order by gmv desc) * 100.0 / sum(gmv) over () , 2) as cum_cnt , 
+	row_number() over (order by gmv desc) as rn 
+from user_gmv , 
+order by gmv desc 
+```
+
+（3）周内分布
+```MySQL
+
+```
+
+（4）地区品类交叉GMV占比分析
+```MySQL
+
+```
+
+## 三、**基于MySQL查询分析得出的结论**
 
 
 
