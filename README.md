@@ -244,18 +244,76 @@ order by gmv desc
 ```
 
 （3）周内分布
-```MySQL
 
+**星期维度经营分析**：看一周七天里，哪天下单最多、GMV 最高、客单价最贵
+
+- ***`DAYOFWEEK(order_time)`*** —— 返回星期数字，不过周日对应的是数字1，周一对应数字2，以此类推
+- ***CASE DAYOFWEEK(order_time)  WHEN 1 THEN '周日'*** 是将对应的数字类型转换为汉字，简单的 **CASE 表达式 WHEN 值 THEN 结果** 写法
+- 还有值得注意的是，在查询分组条件上，也需要添加上汉字类型的分组，不然会报错
+```MySQL
+select 
+	dayofweek(order_time) as dow_num , 
+	case dayofweek(order_time)
+	    WHEN 1 THEN '周日' WHEN 2 THEN '周一' WHEN 3 THEN '周二' 
+	    WHEN 4 THEN '周三' WHEN 5 THEN '周四' WHEN 6 THEN '周五' 
+	    WHEN 7 THEN '周六'  
+	END AS dow_name
+	count(distinct order_id) as order_cnt , 
+	round(sum(amount) , 2) as gmv , 
+	round(sum(amount) / count(distinct order_id) , 2) as aov
+from dw_order_wide 
+group by 
+	dayofweek(order_time), 
+	case dayofweek(order_time)
+	    WHEN 1 THEN '周日' WHEN 2 THEN '周一' WHEN 3 THEN '周二' 
+	    WHEN 4 THEN '周三' WHEN 5 THEN '周四' WHEN 6 THEN '周五' 
+	    WHEN 7 THEN '周六'  
+	END
+order by dow_num
 ```
 
 （4）地区品类交叉GMV占比分析
-```MySQL
 
+主要涉及到的为**PARTITION BY**函数
+
+- **`SUM(gmv) OVER (PARTITION BY region)`** 按照表格字段：区域分成不同窗口，再对区域求GMV的和，拿到每个区域对应的总GMV，由此可以计算**对应品类在该区域GMV占比多大**
+- **`SUM(gmv) OVER (PARTITION BY category)`** 按照表格字段：品类分成不同窗口，再对品类求GMV的和，拿到每个品类对应的总GMV，由此可以计算**对应区域在该品类GMV占比多大**
+
+```MySQL
+with t as (
+	select 
+		region , 
+		category , 
+		round(sum(amount) , 2) as gmv , 
+		count(distinct order_id) as order_cnt ,
+	from dw_order_wide ,
+	group by region , category
+)
+select 
+	region , 
+	category , 
+	gmv , 
+	order_cnt , 
+	round(gmv * 100.0 / sum(gmv) over (partition by region) , 2) as pct_in_region , 
+	round(gmv * 100.0 / sum(gmv) over (partition by category) , 2) as pct_in_category
+from t 
+order by region , gmv desc 
 ```
 
-## 三、**基于MySQL查询分析得出的结论**
+## 三、**基于MySQL查询结果进行分析**
 
+**1、首先基于MySQL基础表格查询结果本身**
 
+- 由于是模拟数据，所以每月稳定三个购买订单，每周稳定一个购买订单
+- 按品类 / 渠道 / 地区分组对比查询可观察到
+	- （1）数码、服饰类消费占比最大
+	- （2）下单渠道区别不大，小程序、APP、PC端下单次数较为平均
+	- （3）下单用户所在地区主要集中在华南、华北、华东
+- GMV月环比最高的前三个为25-05、25-11、26-05，月同比最高的是26-08
+
+**2、再基于MySQL组合宽表的描述性分析**
+
+- 
 
 
 
