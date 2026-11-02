@@ -355,14 +355,13 @@ order by region , gmv desc
 
 首先利用脚本生成两万行左右的数据表格，其中包含一定量的脏数据，方便我们进行数据清洗的练习操作。该生成表主要包含的字段有事件id、用户id、事件时间、事件类型、平台类型、系统类型、消费
 
-# 二、数据分析
+## 二、数据分析
 
 **1、读取数据与描述性统计**
 
 （1）首先导入必要包
 ```Python
 import pandas as pd 
-import numpy as np
 ```
 
 （2）读取 - 顺便简单的看一下表格结构
@@ -380,7 +379,7 @@ df.shape()
 
 （4）展示表格各列类型
 
-这里就可以观察表格各个字段的类型是否符合要求，例如日期字段在这结果显示的是object类型，显然是不行的，所以在后面的清洗环节需要将其转化未datetime类型
+这里就可以观察表格各个字段的类型是否符合要求，例如日期字段在这结果显示的是object类型，显然是不行的，所以在后面的清洗环节需要将其转化为datetime类型，其他字段同理，需要将他们转化为需要的类型
 ```Python
 df.dtypes()
 ```
@@ -531,11 +530,77 @@ df['month'] = df['event_time'].dt.to_period('M').astype(str)
 print(df[["event_time","date","hour","dow","dow_name","week","month"]].head())
 ```
 
+**7、类型转换**
 
+确保数值列是数值类型、id列是字符串类型，最后整体查看一下表格字段类型，确认字段类型转换成功，再确认数值行 NaN 数量
 
+- `to_numeric(errors="coerce")`：把无法转数值的变成 `NaN`，再 `fillna(0)`。**先看有多少 NaN 再决定 fill 还是删**。
+- `category` 类型：节省内存，且 `value_counts`、`groupby` 更快。但注意 category 不能直接做数值运算。
+- ID 用 `str`：避免 `001` 变成 `1`。
 
+```Python
+df['amount'] = pd.to_numeric(df['amount'] , error = 'coerce').fillna(0.0)
+df['user_id'] = df['user_id'].astype(str)
+df['event_id'] = df['event_id'].astype(str)
+df['event_type'] = df['event_type'].astype('category')
+df['channel'] = df['channel'].astype('category')
 
+print(df.dtypes)
+print("amount 非数值行数:", df["amount"].isna().sum())
+```
 
+**8、清洗前后对比与清洗日志**
 
+| 步骤   | 处理前   | 处理后   | 删除/修改  | 规则                                                                | 原因                                        |
+| ---- | ----- | ----- | ------ | ----------------------------------------------------------------- | ----------------------------------------- |
+| 去重   | 21162 | 20541 | 621    | 按 event_id 保留首行                                                   | 重复行虚增指标                                   |
+| 事件类型 | 20541 | 20541 | 修改 0 行 | strip + lower，非标准值标 unknown                                       | 大小写导致分组错误，但最终结果显示未修改任何字段，推测在去重时就将不合规字段删除了 |
+| 渠道   | 20451 | 20451 | 修改 0 行 | 映射表统一，web 并入 PC                                                   | 可能渠道名不一致，但结果同上                            |
+| 时间空值 | 20451 | 20451 | 修改0行   | to_datetime coerce 后删除                                            | 删除无法参与时间分析的值，但该表中未出现                      |
+| 类型转换 | 20451 | 20451 | 修改对应列  | amount→float, id→str,<br>event_type→category,<br>channel→category | 防止聚合错误                                    |
 
+口径说明：
+- 事件类型只保留 exposure/click/add_cart/order/pay，其余标 unknown 并保留。
+- Web 端并入 PC 渠道。
+- 删除空时间行，假设空时间占比 <2%，不构成系统性偏差。
+
+```Python
+df['user_id'].nunique() # 输出该表有多少唯一用户
+```
+
+清洗后概况：20451 行，1791个用户，5 类事件，3 个渠道。
+
+**9、保存清洗结果与检查**
+
+这一步就是将前面清洗好的数据保存成一个新表 events_clean.csv ，避免覆盖，同时检查数据结构能否对应上清洗后的结果
+
+但由于保存成 CSV表格 时清洗字段格式不保留，所以导出新表的作用是为了交付或者给他人查看
+
+在读取时显示指定字段类型，才能将数据类型原本读回
+
+```Python
+df.to_csv('event_clean.csv' , index = False,encoding='utf-8')
+```
+
+```Python
+df1 = pd.read_csv(
+    "events_clean.csv",
+    encoding="utf-8",
+    parse_dates=["event_time"],          # 时间列直接解析成 datetime
+    dtype={
+        "user_id": str,
+        "event_id": str,
+        "event_type": "category",
+        "channel": "category",
+    },
+)
+
+print(df1.dtypes)
+```
+
+```Python
+df1.shape
+```
+
+确认最终结果和清洗后一致，基础的数据清洗工作就到此完成了
 
