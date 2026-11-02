@@ -251,7 +251,7 @@ order by gmv desc
 **星期维度经营分析**：看一周七天里，哪天下单最多、GMV 最高、客单价最贵
 
 - ***`DAYOFWEEK(order_time)`*** —— 返回星期数字，不过周日对应的是数字1，周一对应数字2，以此类推
-- ***CASE DAYOFWEEK(order_time)  WHEN 1 THEN '周日'*** 是将对应的数字类型转换为汉字，简单的 **CASE 表达式 WHEN 值 THEN 结果** 写法
+- ***`CASE DAYOFWEEK(order_time)  WHEN 1 THEN '周日'`*** —— 是将对应的数字类型转换为汉字，简单的 **`CASE 表达式 WHEN 值 THEN 结果`** 写法
 - 还有值得注意的是，在查询分组条件上，也需要添加上汉字类型的分组，不然会报错
 ```MySQL
 select 
@@ -349,11 +349,187 @@ order by region , gmv desc
 - 局限：描述性分析，未做显著性检验；样本量小，结论需后续数据验证
 
 
-  
-  
+# 利用Python生成事件数据以及清洗分析操作
 
+## 一、数据生成 - gen_events.py
 
+首先利用脚本生成两万行左右的数据表格，其中包含一定量的脏数据，方便我们进行数据清洗的练习操作。该生成表主要包含的字段有事件id、用户id、事件时间、事件类型、平台类型、系统类型、消费
 
+# 二、数据分析
+
+**1、读取数据与描述性统计**
+
+（1）首先导入必要包
+```Python
+import pandas as pd 
+import numpy as np
+```
+
+（2）读取 - 顺便简单的看一下表格结构
+```Python
+df = pd.read_csv('events.csv' , encoding='utf-8')
+df.head(10)
+```
+
+（3）展示表格形状
+
+观察输出结果发现该表在未清洗的情况下总共 21162行、7列
+```Python
+df.shape()
+```
+
+（4）展示表格各列类型
+
+这里就可以观察表格各个字段的类型是否符合要求，例如日期字段在这结果显示的是object类型，显然是不行的，所以在后面的清洗环节需要将其转化未datetime类型
+```Python
+df.dtypes()
+```
+
+（5）统计表格缺失值数量
+
+检查表格有无缺失值，在后续根据需要对缺失值进行一定处理
+```Python
+df.isna().sum()
+```
+
+（6）检查表格事件类型与渠道类型分布
+
+这里主要是针对事件类型列进行分布查看，输出发现exposure类型最多，但有大小写不统一导致部分字段原本同意却分开统计，说明这在后续的清洗环节也需要注意统一字段大小写等操作
+```Python
+df['event_type'].value_counts(dropna = False)
+df['channel'].value_counts(dropna = False)
+```
+
+（7）金额描述
+
+负责将金额详细分布情况写出，总值、平均值、中位数、最小最大值等相关指标
+```Python
+df['amount'].describe()
+```
+
+**2、去重**
+
+这个过程目的是为了删除完全重复行，避免影响到后续的分析结果
+
+`subset=["event_id"]`：以业务主键判断重复
+
+`keep="first"`：保留第一次出现的行
+
+`keep=False` 是标记所有重复行，常用于**诊断**而不是删除
+
+`.copy()`：避免后续操作触发 `SettingWithCopyWarning`
+
+操作后发现有1237行事件id重复，我们保留第一个出现的事件，其余重复的直接删除，共删除621行，该表格从原本的 21162行变为现在的 20541行
+```Python
+before = len(df)
+dup_mask = df.duplicated(subset = ['event_id'] , keep = False)
+print("重复的 event_id 行数:",dup_mask.sum())
+print(df[dup_mask].sort_values('event_id').head(10))
+
+df = df.drop_duplicates(subset = ['event_id'] , keep = 'first').copy()
+after = len(df)
+print(f"去重：{before} → {after}，删除 {before - after} 行")
+```
+
+**3、统一事件类型**
+
+前面也提到了，由于大小写的不同导致会额外对这些意思相同的字段进行分开统计，这不是我们想要的，我们需要将事件类型统一
+
+映射表兜底可以将未成功转化的且不在映射表里的转化为unknown，后面再对这些列做决定
+
+`where(..., "unknown")`：**不要静默丢弃**无法识别的值，先标成 `unknown`，再决定删还是查。这比直接 `replace` 更安全
+
+```Python
+print("处理前:", df["event_type"].value_counts(dropna=False).to_dict())
+
+df['event_type'] = (
+	df['event_type']
+	.astype(str)
+	.str.strip() # 去首尾空格
+	.str.lower() # 统一字段为小写
+)
+
+# 用映射表兜底：把非标准值显式映射，映射不到的标为 unknown
+valid = {"exposure", "click", "add_cart", "order", "pay"}  
+df["event_type"] = df["event_type"].where(df["event_type"].isin(valid), "unknown")
+
+print("处理后:", df["event_type"].value_counts(dropna=False).to_dict())
+```
+
+**4、统一渠道**
+
+目的同上
+
+渠道和事件类型不同，渠道有中文，所以使用映射表最稳妥，将所有已知变体写清楚，将字段统一转化
+
+映射表的使用方式
+
+- **键**：原始数据里可能出现的各种写法。
+- **值**：统一后的标准名称。
+
+在这里面，web端并入到pc
+
+```Python
+print("处理前:", df["channel"].value_counts(dropna=False).to_dict())
+
+channel_map = {
+    "app": "App", "APP": "App", "App": "App",
+    "小程序": "小程序", "mini": "小程序",
+    "pc": "PC", "PC": "PC", "web": "PC",
+}
+df["channel"] = (
+    df["channel"].astype(str).str.strip()
+    .replace(channel_map)
+)
+df["channel"] = df["channel"].where(df["channel"].isin({"App", "小程序", "PC"}), "unknown")
+
+print("处理后:", df["channel"].value_counts(dropna=False).to_dict())
+```
+
+**5、处理时间空值**
+
+这一步目的是为了将时间列转化为datetime类型，同时对空值以及非法值进行处理
+
+这一步和前面去重的操作差不多，先将该列转化为日期列，然后检查该列的空值以及非法值，将它们删除
+
+- `errors="coerce"`：把无法解析的值变成 `NaT`，而不是直接抛错。**这是诊断的关键**——先看看有多少、长什么样。
+- 删除前先打印：确认空值行是否集中在某些用户/事件上，避免系统性偏差。
+- 如果空值比例很高，不要直接删，要考虑填充或找上游修复。
+
+`df.loc[na_time, ["event_id", "user_id", "event_type"]].head()` **从 `df` 中筛选出“时间字段缺失”的那些行，只保留三列 `event_id`、`user_id`、`event_type`，然后打印前 5 行**
+
+```Python
+before = len(df)
+df["event_time"] = pd.to_datetime(df["event_time"], errors="coerce")
+
+na_time = df['event_time'].isna()
+print("时间空值/非法行数:", na_time.sum())
+print(df.loc[na_time, ["event_id", "user_id", "event_type"]].head())
+
+df = df.dropna(subset = ['event_time']).copy()
+print(f"时间清洗：{before} → {len(df)}，删除 {before - len(df)} 行")
+```
+
+**6、时间字段派生**
+
+目的是为了扩展分析维度，将时间派生为星期、日期、小时等字段
+
+趋势分析按天、周内分布按星期、漏斗顺序按时间排序，都需要派生字段
+
+`.to_period("W")` **把 `event_time` 这一列的每个时间点，转换成它所属的“那一周”周期，并以字符串形式存到新列 `week` 里**
+
+.`to_period("M")`  **把 `event_time` 这一列的每个时间点，转换成它所属的“那一月”周期，并以字符串形式存到新列 `month` 里**
+
+```Python
+df['date'] = df['event_time'].dt.date
+df['hour'] = df['event_time'].dt.hour
+df['dow'] = df['event_time'].dt.dayofweek
+df['dow_name'] = df['dow'].map({0:"周一",1:"周二",2:"周三",3:"周四",4:"周五",5:"周六",6:"周日"})
+df["week"] = df["event_time"].dt.to_period("W").astype(str)
+df['month'] = df['event_time'].dt.to_period('M').astype(str)
+
+print(df[["event_time","date","hour","dow","dow_name","week","month"]].head())
+```
 
 
 
