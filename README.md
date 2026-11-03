@@ -353,7 +353,7 @@ order by region , gmv desc
 
 ## 一、数据生成 - gen_events.py
 
-首先利用脚本生成两万行左右的数据表格，其中包含一定量的脏数据，方便我们进行数据清洗的练习操作。该生成表主要包含的字段有事件id、用户id、事件时间、事件类型、平台类型、系统类型、消费
+首先利用脚本生成两万行左右的数据表格，由于是虚拟数据并不涉及到现实情况，所以逻辑上可能和现实生活中有些偏差。表格中包含一定量的脏数据，方便我们进行数据清洗的练习操作。该生成表主要包含的字段有事件id、用户id、事件时间、事件类型、平台类型、系统类型、消费
 
 ## 二、数据清洗
 
@@ -794,4 +794,172 @@ g['pay_rate'].plot(kind = 'bar' , title="各渠道支付转化率")
 - 建议优先在 App 渠道做转化优化，PC 渠道补充数据后再判断
 
 **4、透视表与交叉分析**
+
+分组对比是“一个维度”，透视表是“**两个维度交叉**”：渠道 × 设备、地区 × 品类、日期 × 事件类型。用来发现结构性差异
+
+核心构造思路就是：
+
+透视表 = **行维度 × 列维度 × 聚合值**。
+- 行放什么、列放什么；
+- 聚合用 `nunique`（人数）还是 `sum`（金额）还是 `count`（次数）；
+- 要不要加合计（`margins=True`）。
+
+（1）先做一个最简单的透视表
+
+按照行为渠道、列为系统，聚合用户数量作为标准
+
+- `aggfunc="nunique"` 算支付人数
+- `fill_value=0` 让空组合显示 0 而不是 NaN
+- `margins=True` 是在结果表中显示行列合计
+
+```Python
+pt = pd.pivot_table(
+	df1[df1['event_type'] == 'pay'] , 
+	values = 'user_id' , 
+	index = 'channel' , 
+	columns = 'device' , 
+	aggfunc = 'nunique' , 
+	fill_value = 0 , 
+	margins = True , 
+	margins_name = '合计',
+)
+pt 
+```
+
+（2）计算行列各值占比
+
+**行占比**回答“每个渠道内部设备怎么分布”，**列占比**回答“每个设备主要来自哪个渠道”
+
+关于div
+
+- `div` 是 `divide` 的缩写，等价于 `/`
+- **关键区别**：`div` 可以用 `axis` 参数指定对齐方向，`/` 默认按列对齐，容易出错
+- `axis=0` 表示：让右边的 Series **按行索引（index）对齐**，也就是每一行除以该行对应的和
+
+首先先将上面的pt结果表中行列的合计字段删除，然后求每行的和，再将每行的结果除以该行和，并只取小数点后三位，这样可以回答渠道内部设备是怎么分布的问题
+
+再将`.div`内部参数的求和改为列，再将每列的结果除以列和，这样就可以回答每个设备主要来自哪个渠道的问题
+
+在这里我建议是将`axis`的参数写的明白一些，不使用1或者0来代替行或者列，这样代码不仅更易懂，后续也不容易出错
+
+```Python
+# 计算行占比 - 每个渠道内部设备怎么分布
+pt_pct = pd.drop('合计' , axis = 'index').drop('合计' , axis = 'columns')
+pt_pct = pt_pct.div(pt_pct.sum(axis='columns') , axis = 'index').round(3)
+pt_pct
+```
+
+```Python
+# 计算列占比 - 每个设备主要来自哪个渠道
+pt_pct = pt.drop("合计" , axis = "index").drop("合计", axis= "columns")  
+pt_pct = pt_pct.div(pt_pct.sum(axis="index"), axis="columns").round(3)  
+pt_pct
+```
+
+（3）绘制一个占比热力图
+
+可视化结果可以让分析结果更加清晰易懂 ，按照`pt_pct`这个透视表绘制热力图
+
+```Python
+import seaborn as sns  
+sns.heatmap(pt.drop("合计").drop("合计", axis=1), annot=True, fmt=".0f", cmap="YlOrRd")
+```
+
+（4）关于这部分结果解读
+
+- 渠道 × 设备交叉显示，App 渠道中 iOS 支付人数占 44%，Android 占 39.4%
+- 小程序渠道以 iOS 为主（39.2%）
+- PC 渠道各设备样本均 < 70 人，结构差异不具参考性
+- 建议 App 端优先优化 iOS 体验，小程序端重点保障 iOS 兼容性
+
+**5、漏斗分析**
+
+回答“**用户从进入到支付，在哪一步流失最多**”，这是转化分析的核心方法
+
+漏斗的本质是**按步骤算去重用户数，再算相邻步骤的转化率**。三个关键口径必须先定：
+
+- **步骤顺序**：exposure → click → add_cart → order → pay；
+- **用户口径**：出现过该事件就算，还是必须按时间顺序完成？
+- **时间窗口**：一次会话内，还是一天内，还是不限时间？
+
+我们这简单演示一下，**简化版用“出现过该事件的用户数”**，报告里必须写明“未要求严格顺序”
+
+（1）整体漏斗情况
+
+先按照上面提到的步骤顺序定义漏斗顺序`steps`，核心就是将`df1`表格按照`event_type`分组并只保留`user_id`字段并聚合计算每组的用户数量，再按照漏斗顺序重排，缺失的补0
+
+按照漏斗顺序构造表格并填入`step`和`users`对应的聚合数值
+
+- `reindex(steps)` 保证顺序正确
+- `shift(1)` 算相邻步骤转化率
+- `iloc[0]` 算整体转化率
+
+| 写法          | 作用              | 一句话记忆    |
+| ----------- | --------------- | -------- |
+| `.shift(1)` | 把值**整体往下挪 1 行** | 取"上一行"的值 |
+| `.iloc[0]`  | 按**位置**取第 1 个元素 | 取"第一个"值  |
+```Python
+steps = ["exposure", "click", "add_cart", "order", "pay"]
+funnel = df1.groupby('event_type' , observed = True)['user_id'].nunique().reindex(steps).fillna(0)
+funnel_df = pd.DataFrame({"step": steps, "users": funnel.values})
+funnel_df["step_rate"] = funnel_df["users"] / funnel_df["users"].shift(1)  
+funnel_df["overall_rate"] = funnel_df["users"] / funnel_df["users"].iloc[0]
+funnel_df 
+```
+
+（2）观察最大流失环节
+
+**看绝对流失人数，不只看转化率**。转化率最低的环节不一定流失人数最多
+
+对`funnel_df`表添加流失人数字段，我们计算相邻步骤的流失人数`lost_users`，然后将`funnel_df`表按照流失人数`lost_users`字段降序排序并取前两个结果，观察是哪个环节流失人数最多
+
+- 在到下单这一步的用户流失是最多的，可能原因是只是想先加入购物车等后续有需要再购买，也可能是突然觉得没有必要购买了
+- 第二是加入购物车这一步，可能原因是点进商品界面发现宣传和实际不符或者观察买家秀之后觉得和自己心理预期不符
+
+```Python
+funnel_df['lost_users'] = funnel_df['users'].shift(1) - funnel_df['users']
+funnel_df.sort_values('lost_users' , ascending = False).head(2)
+```
+
+（3）分渠道漏斗
+
+- `unstack()` 转的是内层索引，在这个表中我们是先对`channel`分组，再对`event_type`分组，那`event_type`就是内层索引，把 `event_type` 从行变成列
+- `div(..., axis='index')` 按行做除法，得到每步相对曝光的转化率
+
+计算各个渠道划分的转化率：每行exposure指标作为被除数，随后每行的其他参数值除以exposure得到转化率
+
+```Python
+ch_funnel = df1.groupby(['channel' , 'event_type'] , observed = True)['user_id'].nunique().unstack()[steps]
+ch_rate = ch_funnel.div(ch_funnel['exposure'] , axis = 'index')
+ch_rate.round(3)
+```
+
+（4）漏斗图绘制（使用柱状图简单观察趋势）
+
+```Python
+import matplotlib.pyplot as plt  
+plt.barh(funnel_df["step"][::-1], funnel_df["users"][::-1])  
+for i, v in enumerate(funnel_df["users"][::-1]):  
+    plt.text(v, i, f" {v:.0f}", va="center")  
+plt.title("整体转化漏斗")  
+plt.show()
+```
+
+（5）关于这部分结果解读
+
+- 整体漏斗从曝光到支付转化率为 33.45%。最大流失在 add_cart→order 环节，环节转化率仅 39.20%，流失 420 人。
+- 分渠道看，App 在该环节转化率最低（37.4%），是优先优化对象。
+- 注意：本漏斗采用“出现过事件即计入”口径，未要求严格时间顺序，结论为描述性发现
+
+
+
+
+
+
+
+
+
+
+
+
 
