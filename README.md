@@ -612,9 +612,22 @@ df1.shape
 
 由于最好就是另开一份notebook文件来编写分析代码，所以在这里我先将清洗好的CSV表格数据按照规定字段类型读入
 
+由于该部分涉及一些简单的图表绘制，会出现中文乱码的情况，所以现在开头全局设置好
+
+```Python
+import matplotlib.pyplot as plt  
+  
+# 设置中文字体  
+plt.rcParams['font.sans-serif'] = ['SimHei']   # Windows 常用  
+plt.rcParams['axes.unicode_minus'] = False     # 正常显示负号
+```
+
 ```Python
 import pandas as pd  
+import numpy as np 
+```
 
+```Python
 # 指定字符格式读入数据  
 df1 = pd.read_csv(  
     "events_clean.csv",  
@@ -723,7 +736,62 @@ pay.boxplot(column="amount")
 
 （1）先指定指标口径
 
+先将口径写成注释，再写代码，口径不清楚的话后面的计算数字可能就对不上
 
+```Python
+# 示例：按渠道对比
+# 用户数 = nunique(user_id)
+# 支付用户数 = event_type=='pay' 的 nunique(user_id)
+# GMV = pay 事件 amount 之和
+# 支付转化率 = 支付用户数 / 用户数
+# 客单价 = GMV / 支付用户数
+```
 
+（2）指标计算
 
+使用agg函数一次性计算多个指标，这多个指标合并到同一个表格g中，方便查看
+
+`agg` 里用 `nunique` 算人数，用 `count` 算事件数，用`sum`算分组后的各组消费情况。同时再往g表格中添加各个平台消费用户、消费用户占比以及人均单价字段，最后整合成一个表格按照升序的顺序输出
+
+`ascending = False`控制的是排序顺序，这里是正序
+
+```Python
+g = df1.groupby('channel' , observed = True).agg(
+	users = ('user_id' , 'nunique'),
+	events = ('event_id' , 'count') , 
+	gmv = ('amount' , 'sum')
+)
+pay_users = df1[df1['event_type'] == 'pay'].groupby('channel' , observed = True)['user_id'].nunqiue()
+g['pay_users'] = pay_users
+g['pay_rate'] = g['pay_users'] / g['users']
+g['aov'] = g['gmv'] / g['pay_users']
+g.sort_values('pay_rate' , ascending = False)
+```
+
+（3）统计样本量，标注小样本
+
+这一步是将g表格中**用户数量**小于100的标记为样本不足，否则就不标记，该行该列的位置留空
+
+想我们这个数据集，在PC，APP，小程序这三个平台上的用户数量均大于100，所以我们g的flag列在这三行中都为空
+
+```Python
+g['flag'] = np.where(g['users'] < 100 , '样本不足' , '')
+```
+
+（4）简单输出个支付转化率的柱状图
+
+支付转化率在前面g表格中已经计算好了，根据平台支付用户和平台总用户的比值得出
+
+```Python
+g['pay_rate'].plot(kind = 'bar' , title="各渠道支付转化率")
+```
+
+（5）关于这部分结果解读
+
+- 各渠道支付转化率分别为 App 31.9%、小程序 34.1%、PC 36.1%
+- App 用户数最多且转化率 中等 （也大于20%，但相对于其他两个平台低），是主力渠道
+- PC 转化率 高 但样本仅 368 人，结论可能没有其他两个平台的可靠
+- 建议优先在 App 渠道做转化优化，PC 渠道补充数据后再判断
+
+**4、透视表与交叉分析**
 
