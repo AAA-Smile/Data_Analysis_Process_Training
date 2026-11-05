@@ -1058,5 +1058,97 @@ retention.plot(marker="o", title="各 cohort 留存曲线")
 - 最后 6 个 cohort 因观察期不足未纳入 D30 对比
 - 建议对 D7 流失用户做召回，并排查晚 cohort 留存下降的渠道来源
 
+**7、相关性分析**
 
+回答“**两个数值指标是否同向变化**”，相关性只能说明“一起变”，**不能说明谁导致谁**
+
+- 先按用户/日期聚合出数值指标
+- 算 Pearson 相关系数（线性关系）
+- 用散点图验证，避免被异常值或非线性关系误导
+
+我们这按照用户级作为相关性分析颗粒度，先按 `user_id` 聚合出数值指标，再从中挑参数；后续可以自行研究日期级和渠道级
+
+（1）构造参数候选值
+
+计算一些简单的表格字段
+
+```Python
+user_agg = df1.groupby('user_id').agg(
+	events = ('event_id' . 'count'),
+	active_days = ('date' , 'nunique'),
+	pay_cnt = ('event_type' , lambda s : (s == 'pay').sum()) , 
+	gmv = ('amount' , 'sum') , 
+	avg_amount=("amount", lambda s: s[s > 0].mean()),      
+	first_day=("date", "min"),  
+	last_day=("date", "max"),
+)
+user_agg["life_days"] = (user_agg["last_day"] - user_agg["first_day"]).dt.days + 1  
+user_agg["pay_rate"] = user_agg["pay_cnt"] / user_agg["events"]  
+user_agg.describe()
+```
+
+
+（2）按照业务问题挑选参数组合
+
+挑选三到五个左右即可，这里我们选择以下四个参数：`events`、`active_days`、`pay_cnt`、`gmv`，覆盖活跃度和变现两个维度，矩阵也不至于太大
+
+（3）计算相关矩阵
+
+涉及到相关公式计算，要了解详情可自行搜索
+
+判断指标：
+
+- 绝对值 > 0.7：强相关，两个指标可能测的是同一件事
+- 0.3–0.7：中等相关，有同向趋势但不够强
+- < 0.3：弱相关，基本可以认为无关
+- 接近 0：不要强行解释
+
+```Python
+cols = ["events", "active_days", "pay_cnt", "gmv"]  
+corr = user_agg[cols].corr(method="pearson").round(2)  
+corr
+```
+- 根据输出结果我们可以发现`active_days`和`events`、以及`pay_cnt`和`gmv`呈强正相关，这是必然的，毕竟活跃的日期肯定会发生事件、付款必定会增加gmv
+- 观察矩阵可以发现没有呈完全弱相关的指标组合，基本都是呈现中等相关
+
+（4）绘制散点图
+
+计算完相关矩阵之后一定要画图确认，相关矩阵容易被极值误导
+（图怎么看我也不是很清楚，晚点补课）
+
+- 是不是线性趋势？如果散点呈弧形，Pearson 会低估相关；
+- 有没有一两个极值点把相关系数拉高？去掉最高 1% 再算一次对比；
+- 有没有明显的分群？比如两团点，说明有第三变量（如渠道）在起作用。
+
+```Python
+import matplotlib.pyplot as plt  
+  
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))  
+user_agg.plot.scatter(x="events", y="gmv", alpha=0.3, ax=axes[0], title="events vs gmv")  
+user_agg.plot.scatter(x="pay_cnt", y="gmv", alpha=0.3, ax=axes[1], title="pay_cnt vs gmv")  
+plt.tight_layout()  
+plt.show()
+```
+
+（5）稳健性检查
+
+去除极值再进行计算
+
+```Python
+q99 = user_agg["gmv"].quantile(0.99)  
+corr_trim = user_agg[user_agg["gmv"] <= q99][cols].corr().round(2)  
+print("去掉 GMV 前 1% 后:\n")  
+corr_trim
+```
+
+观察前后的相关矩阵的数值变化：
+
+- 可以发现各个数值变化都不是很明显，强相关的两个值只掉了2%
+- `events` vs `gmv`的变化也不明显，相关性较为稳定
+
+（6）关于这部分结果解读
+
+- 用户事件数与 GMV 的 Pearson 相关系数为 0.55，呈 中等 正相关
+- 去掉 GMV 前 1% 极值后为 0.53，稳定，说明 活跃度与消费同向 
+- 注意：相关不等于因果，需结合渠道和用户分层进一步验证
 
