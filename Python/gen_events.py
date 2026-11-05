@@ -1,3 +1,5 @@
+# 数据生成脚本
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -19,11 +21,11 @@ trans = {"exposure": 1.0, "click": 0.35, "add_cart": 0.45, "order": 0.5, "pay": 
 
 rows = []
 for _, u in users.iterrows():
-    if np.random.rand() > 0.9:          # 10% 用户无行为
+    if np.random.rand() > 0.9:
         continue
-    n_sessions = np.random.randint(1, 14)   # 每个用户 1~13 次会话
+    n_sessions = np.random.randint(1, 14)
     for _ in range(n_sessions):
-        days_after = np.random.randint(0, n_days)
+        days_after = np.random.randint(0, n_days)   # 关键：0~29 天
         t = u["register_date"] + timedelta(
             days=days_after,
             hours=np.random.randint(0, 24),
@@ -50,7 +52,6 @@ for _, u in users.iterrows():
 df = pd.DataFrame(rows)
 raw_n = len(df)
 
-# 注入脏数据：2% 大小写/空值，1% 重复
 dirty = df.sample(frac=0.02, random_state=1).copy()
 dirty["event_type"] = dirty["event_type"].replace({"click": "Click", "pay": "PAY"})
 dirty["channel"] = dirty["channel"].replace({"App": "app", "PC": "pc"})
@@ -59,8 +60,4 @@ df = pd.concat([df, dirty], ignore_index=True)
 df = pd.concat([df, df.sample(frac=0.01, random_state=2)], ignore_index=True)
 
 df.to_csv("events.csv", index=False, encoding="utf-8-sig")
-
-print("干净数据行数:", raw_n)
-print("最终总行数:", df.shape[0])
-print("脏/重复行数:", df.shape[0] - raw_n)
-print(df["event_type"].value_counts())
+print("干净行数:", raw_n, "总行数:", len(df))

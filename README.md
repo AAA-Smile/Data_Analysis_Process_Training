@@ -351,7 +351,7 @@ order by region , gmv desc
 
 # 利用Python生成事件数据以及清洗分析操作
 
-## 一、数据生成 - gen_events.py
+## 一、数据生成
 
 首先利用脚本生成两万行左右的数据表格，由于是虚拟数据并不涉及到现实情况，所以逻辑上可能和现实生活中有些偏差。表格中包含一定量的脏数据，方便我们进行数据清洗的练习操作。该生成表主要包含的字段有事件id、用户id、事件时间、事件类型、平台类型、系统类型、消费
 
@@ -951,15 +951,112 @@ plt.show()
 - 分渠道看，App 在该环节转化率最低（37.4%），是优先优化对象。
 - 注意：本漏斗采用“出现过事件即计入”口径，未要求严格时间顺序，结论为描述性发现
 
+**6、留存/同期群分析**
 
+回答“**用户来了之后还回不回来**”。漏斗看单次转化，留存看长期价值。cohort（同期群）分析按注册批次分组，排除“新用户多导致整体留存虚高”的干扰
 
+- **cohort 标签**：按注册周/月给用户分组；
+- **观察期**：注册后第 N 天是否有行为；
+- **留存率**：某 cohort 在第 N 天活跃人数 / 该 cohort 总人数。
 
+**分母是该 cohort 的总人数，不是当天活跃人数**。这是留存和活跃度最容易混的地方
 
+（1）给用户打cohort标签
 
+- 从 `df1` 中按 `user_id` 去重（每个用户只保留一行），只取 `user_id` 这一列，并复制成一个独立的新 DataFrame，其中`user_id`外嵌套两层中括号是为了保证取出的数据还是 DataFrame 
+- 再按照用户分组，取每组的最小时间（即第一次发生事件的时间），然后将索引还原成普通列得到一个两列表`first_event`
+- 再往该列表中添加`cohort`列，对时间取其对应的 周 周期
+- 把 `first_event` 表里的"首次事件时间"按 `user_id` 匹配，拼接到 `users` 表上；`users` 里每个用户都保留，匹配不到的时间填 `NaN`
+- 最后按照降序计算出每个周区间有多少个用户
 
+```Python
+users = df1.drop_duplicates('user_id')[['user_id']].copy()
+first_event = df1.groupby('user_id')['event_time'].min().reset_index()
+first_event['cohort'] = first_event['event_time'].dt.to_period('W').astype(str)
+users = users.merge(first_event,on='user_id',how='left')
+users['cohort'].value_counts().sort_index()
 
+```
 
+（2）算每个用户每次活动时间距最早活动起始的天数
 
+```Python
+df1 = df1.merge(users[["user_id", "cohort"]], on="user_id", how="left")  
+df1= df1.drop(columns=["cohort_x", 'cohort_y']) # 删除可能会出现的多余列，看实际表格情况
+
+# 对每组用户求最小date并广播到该组的每一列
+df1['cohort_start'] = df1.groupby("user_id")["date"].transform('min') 
+df1['day_diff'] = (df1['date'] - df1['cohort_start']).dt.days
+df1.head()
+```
+
+（3）计算第N天留存情况
+
+分为多种留存情况分析方式
+
+口径 1：求日留存（现在的写法）
+
+```Python
+cohort_total = users.groupby("cohort")["user_id"].nunique()  
+for d in [0, 1, 7, 14, 30]:  
+    active = df1[df1["day_diff"] == d].groupby("cohort")["user_id"].nunique()  
+    rate = (active / cohort_total).fillna(0).round(3)  
+    print(f"D{d} 留存:\n{rate}\n")
+```
+口径 2：区间留存（首周内任意一天回来）
+
+```Python
+def retention_range(df, cohort_size, start_day, end_day):
+    active = df[(df["day_diff"] >= start_day) & (df["day_diff"] <= end_day)] \
+        .groupby("cohort")["user_id"].nunique()
+    return (active / cohort_size).fillna(0).round(3)
+
+# 首周留存：第 1–7 天任意一天有行为
+r_w1 = retention_range(df, cohort_size, 1, 7)
+print("D1–D7 区间留存:\n", r_w1)
+```
+
+ 口径 3：滚动留存（第 N 天及以后回来过）
+
+```Python
+def retention_rolling(df, cohort_size, day):
+    active = df[df["day_diff"] >= day].groupby("cohort")["user_id"].nunique()
+    return (active / cohort_size).fillna(0).round(3)
+
+print("D7+ 滚动留存:\n", retention_rolling(df, cohort_size, 7))
+```
+
+口径 4：周留存（第 N 周内任意一天回来）
+
+```Python
+df["week_diff"] = df["day_diff"] // 7
+
+def retention_weekly(df, cohort_size, week):
+    active = df[df["week_diff"] == week].groupby("cohort")["user_id"].nunique()
+    return (active / cohort_size).fillna(0).round(3)
+
+for w in [0, 1, 2, 4]:
+    print(f"W{w} 周留存:\n", retention_weekly(df, cohort_size, w), "\n")
+```
+
+（4）绘制留存曲线
+
+可以清除观察各天留存率随着cohort增加的留存情况
+
+```Python
+retention = pd.DataFrame({
+    d: (df1[df1["day_diff"] == d].groupby("cohort")["user_id"].nunique() / cohort_total).fillna(0)
+    for d in [0, 1, 3, 7, 14, 30]
+})
+retention.plot(marker="o", title="各 cohort 留存曲线")
+```
+
+（5）关于这部分结果解读
+
+- 按首次行为周划分 cohort，首周 D1 留存 23.9%，D7 留存 23.3%，D30 留存 0%
+- 越晚的 cohort D7 留存 下降，说明 渠道质量变化/产品改动效果
+- 最后 6 个 cohort 因观察期不足未纳入 D30 对比
+- 建议对 D7 流失用户做召回，并排查晚 cohort 留存下降的渠道来源
 
 
 
