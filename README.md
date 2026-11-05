@@ -1,6 +1,6 @@
 # 数分练习
 
-## 先将需要分析的表格使用MySQL构建起来
+# MySQL表格构建及查询操作
 编写一个SQL脚本运行，其中包含建表，插入数据，查询操作，构建三合一表格等相关操作；主要涉及到普通查询，窗口函数查询等
 
 ## 一、数据库以及表的构建
@@ -1152,3 +1152,131 @@ corr_trim
 - 去掉 GMV 前 1% 极值后为 0.53，稳定，说明 活跃度与消费同向 
 - 注意：相关不等于因果，需结合渠道和用户分层进一步验证
 
+**8、指标拆解分析**
+
+将指标写成乘法公式：
+
+$$
+GMV = 曝光用户数 × 点击率 × 加购率 × 下单率 × 支付率 × 客单价
+$$
+
+然后对比两个群体（或两个时间段）的每个因子，看谁贡献了最大差异
+
+拆解公式必须**乘得回去**，否则口径有漏洞
+
+（1）定义拆解函数
+
+```Python
+def funnel_metrics(d):
+    steps = ["exposure", "click", "add_cart", "order", "pay"]
+    u = d.groupby("event_type", observed=True)["user_id"].nunique().reindex(steps).fillna(0)
+    return pd.Series({
+        "exposure_users": u["exposure"],
+        "click_rate": u["click"] / u["exposure"] if u["exposure"] else 0,
+        "cart_rate": u["add_cart"] / u["click"] if u["click"] else 0,
+        "order_rate": u["order"] / u["add_cart"] if u["add_cart"] else 0,
+        "pay_rate": u["pay"] / u["order"] if u["order"] else 0,
+        "aov": d.loc[d["event_type"] == "pay", "amount"].mean(),
+    })
+```
+
+（2）按渠道拆解
+
+`.T` 转置后，行是因子，列是渠道，方便横向对比
+
+```Python
+metrics = df1.groupby("channel", observed=True).apply(funnel_metrics).T  
+metrics
+```
+
+（3）验证是否乘的回去
+
+这一步是为了验证比率口径是否有问题
+
+```Python
+for ch in metrics.columns:
+    m = metrics[ch]
+    gmv_calc = m["exposure_users"] * m["click_rate"] * m["cart_rate"] * m["order_rate"] * m["pay_rate"] * m["aov"]
+    print(ch, "拆解 GMV:", round(gmv_calc, 2), "实际 GMV:", round(df1[df1["channel"] == ch]["amount"].sum(), 2))
+```
+
+（4）找差异最大的因子
+
+```Python
+diff = metrics["App"] - metrics["PC"]  
+diff.abs().sort_values(ascending=False)
+```
+
+（5）关于这部分结果解读
+
+- GMV 拆解为曝光人数 × 点击率 × 加购率 × 下单率 × 支付率 × 客单价
+- 对比 App 与 PC，差异最大的是 客单价，App 为 972.15、PC 为 1009.90
+- 验证拆解 GMV 与实际 GMV 误差 较大，后续跟进分析一下是什么原因
+- 建议优先优化 PC 端的 落地页 （就是下单率偏低），而非支付环节
+
+**9、异常检测与时间趋势**
+
+回答“**某天的指标波动是正常噪声还是异常**”。避免把偶发波动当成趋势，也避免漏掉真实的结构变化
+
+- 按天聚合核心指标；
+- 用移动平均看趋势；
+- 用标准差或 IQR 标出异常点；
+- 结合业务事件解释异常。
+
+（1）按天聚合
+
+`sort_index()` 保证时间顺序；`date` 列如果是 object，先转 datetime
+
+```Python
+daily = df1[df1["event_type"] == "pay"].groupby("date").agg(  
+    gmv=("amount", "sum"),  
+    pay_users=("user_id", "nunique"),  
+).sort_index()  
+daily.index = pd.to_datetime(daily.index)  
+daily.head()
+```
+
+（2）移动平均图
+
+`min_periods=1` 让前 6 天也有值，不会全是 NaN。窗口选 7 天适合周周期数据
+
+```Python
+daily["ma7"] = daily["gmv"].rolling(7, min_periods=1).mean()  
+daily[["gmv", "ma7"]].plot(title="日 GMV 与 7 日移动平均")
+```
+
+（3）Z-score标异常
+
+`|z| > 2` 是常用阈值，约对应 5% 概率。数据少时阈值可放宽到 2.5
+
+```Python
+daily["z"] = (daily["gmv"] - daily["gmv"].mean()) / daily["gmv"].std()  
+anomaly = daily[daily["z"].abs() > 2]  
+anomaly[["gmv", "z"]]
+```
+
+（4）IQR法找金额异常
+
+IQR 法对长尾数据比 Z-score 稳健，适合找金额异常
+
+```Python
+q1, q3 = df1["amount"].quantile([0.25, 0.75])  
+iqr = q3 - q1  
+outliers = df1[(df1["amount"] < q1 - 1.5 * iqr) | (df1["amount"] > q3 + 1.5 * iqr)]  
+outliers[["event_id", "user_id", "amount"]].head()
+```
+
+（5）结合业务解释
+
+```Python
+anomaly.index.date
+```
+
+（6）关于这部分结果解读（后续补课看看这些代码得出的结论是什么意思）
+
+- 日 GMV 均值 X 元，7 日移动平均整体 先上升后下降。
+- 检测到 2 个异常日（|z|>2），其中 2026-09-23 GMV 达 31179.79 元，有 对应活动记录。
+- 金额 IQR 异常值 758 条，集中在 渠道/品类。
+- 建议对异常日补充业务说明，对金额异常值排查采集逻辑，暂不将单日尖峰视为趋势
+
+**结合以上种种，基础的数据分析工作就基本完成了**
