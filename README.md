@@ -1,6 +1,7 @@
 # 数分练习
 
 # MySQL表格构建及查询操作
+
 编写一个SQL脚本运行，其中包含建表，插入数据，查询操作，构建三合一表格等相关操作；主要涉及到普通查询，窗口函数查询等
 
 ## 一、数据库以及表的构建
@@ -1280,3 +1281,496 @@ anomaly.index.date
 - 建议对异常日补充业务说明，对金额异常值排查采集逻辑，暂不将单日尖峰视为趋势
 
 **结合以上种种，基础的数据分析工作就基本完成了**
+
+# 统计判断、A/B测试以及留存对比
+
+从这里开始我们需要根据数据规律，不仅仅是看数字说话，更要研究数据可不可信，可信的程度有多高
+
+## 一、数据生成
+
+先利用Python脚本生成一份有些许错误的A/B实验数据
+
+主要涉及到：
+
+| 陷阱           | 表现                                      | 练什么    |
+| ------------ | --------------------------------------- | ------ |
+| **SRM**      | 两组人数 52/48，不是 50/50                     | 实验前检查  |
+| **辛普森悖论**    | 整体 treatment 转化率高，但每个渠道内部 treatment 都更低 | 分层分析   |
+| **统计显著但效应小** | 客单价差异可能显著，但只高 8 元                       | 效应量判断  |
+| **新奇效应**     | 前 3 天 treatment 提升大，之后回落                | 时间趋势检查 |
+
+
+## 二、统计基础
+
+### 2.1 总体与样本
+
+- **总体**：所有你想结论覆盖的用户，比如“全平台所有用户”。
+- **样本**：你实际观察到的那部分，比如实验里的 2 万人。
+
+**关键认知**：你永远只能看到样本，但你想对总体下结论。统计就是**用样本推断总体**的工具。
+
+### 2.2 抽样误差与标准误
+
+同样抽 1 万人，算出来的转化率每次都不一样，这叫**抽样误差**。
+
+**标准误（SE）** 衡量“样本统计量围绕真实值的波动有多大”：
+$$
+比例的标准误：SE = sqrt(p(1-p)/n)
+$$
+$$
+均值的标准误：SE = s / sqrt(n)
+$$
+
+直觉：**样本越大，SE 越小，估计越稳**。n 从 1 万增加到 4 万，SE 减半。
+
+### 2.3 置信区间（CI）
+
+**95% 置信区间** = 一个区间，如果重复抽样 100 次，约 95 次这个区间会包含真实值。
+
+比例近似公式：
+
+$$
+CI = p ± 1.96 × SE
+$$
+
+例子：treatment 转化率 12%，n=9600，SE = sqrt(0.12×0.88/9600) ≈ 0.0033，95% CI ≈ 11.35%, 12.65%。
+
+**怎么读**：不要说“真实值有 95% 概率落在区间内”（真实值是固定的，不是随机变量），要说“**用这个方法构造的区间，长期有 95% 会覆盖真实值**”。
+
+### 2.4 假设检验的逻辑：反证法
+
+A/B 测试的默认立场是 **“两组没差异”**，叫**原假设 H0**。备择假设 H1 是“有差异”。
+
+逻辑是反证法：
+
+1. 先假设 H0 成立（没差异）；
+2. 看观察到的数据在这个假设下有多离谱；
+3. 如果太离谱（概率很小），就拒绝 H0，认为有差异。
+
+### 2.5 p 值到底是什么
+
+**p 值 = 在原假设成立的前提下，观察到当前或更极端结果的概率。**
+
+常见误解（必须纠正）：
+
+|错误说法|正确说法|
+|---|---|
+|p=0.03 表示“原假设有 3% 概率为真”|p 值不是 H0 为真的概率|
+|p=0.03 表示“有 97% 概率 treatment 更好”|p 值不直接给“谁更好”的概率|
+|p 越小效应越大|p 小只说明“差异不太可能是偶然”，不说明差异大|
+
+**判断规则**：p < 0.05 通常叫“统计显著”，但 0.05 是人为约定，不是自然定律。
+
+### 2.6 两类错误与功效
+
+|       | 真实没差异      | 真实有差异        |
+| ----- | ---------- | ------------ |
+| 判断没差异 | ✅ 正确       | ❌ 第二类错误（β）   |
+| 判断有差异 | ❌ 第一类错误（α） | ✅ 正确（功效 1-β） |
+
+- **α = 0.05**：没差异却误判有差异的概率，对应“假阳性”；
+- **功效 = 0.8**：有差异时能检测出来的概率；
+- 样本量越小，功效越低，越容易“有差异却测不出来”。
+
+### 2.7 效应量：差异到底多大
+
+p 值回答“可不可信”，**效应量回答“有多大”**。
+
+|指标|效应量|判断|
+|---|---|---|
+|转化率|绝对提升（pp）、相对提升（%）|相对提升 5% 以上通常有业务意义|
+|比例|Cohen's h|0.2 小、0.5 中、0.8 大|
+|均值|Cohen's d|0.2 小、0.5 中、0.8 大|
+
+**核心原则**：先看效应量有没有业务意义，再看 p 值。**p 显著但效应量很小，不一定值得上线**。
+
+
+## 三、实验设计与检查
+
+### 3.1 在实验开始前需要先对实验进行简单设计
+
+**实验设计**
+- 实验背景：商品详情页改版，增加“猜你喜欢”模块
+- 实验假设：新版详情页能提升支付转化率
+- 主指标：支付转化率（converted = 1 的用户占比）
+- 次要指标：客单价（支付用户的 amount 均值）
+- 护栏指标：D1 留存、D7 留存（不能因为改版伤害留存）
+- 分流方式：用户级随机分流，control / treatment
+- 实验周期：14 天（覆盖两个完整周）
+- 样本量：目标每组约 1 万人
+- 决策规则：主指标相对提升 ≥ 5% 且 p < 0.05 且护栏指标不显著下降 → 建议上线
+
+### 3.2 样本量粗算
+
+看看实际的数据量是否足够支撑本次实验（两比例，α=0.05，功效=0.8）
+
+```Python
+from statsmodels.stats.power import NormalIndPower
+from statsmodels.stats.proportion import proportion_effectsize
+
+p1, p2 = 0.10, 0.12
+h = proportion_effectsize(p2, p1)
+n = NormalIndPower().solve_power(effect_size=h, alpha=0.05, power=0.8, ratio=1)
+print(f"每组需要约 {n:.0f} 人")
+```
+
+输出结果显示每组需要约 3835 人，这在我们的数据集上是足够的
+
+### 3.3 实验前检查数据可信度
+
+**（1）SRM检查**
+
+设计为50/50，观察结果如果偏移太多说明分流有问题，后面的分析不可信
+
+```Python
+import pandas as pd  
+from scipy import stats  
+  
+df = pd.read_csv("ab_experiment.csv")  
+counts = df["group"].value_counts()  
+print(counts)  
+  
+# 卡方拟合优度检验：实际比例 vs 期望 50/50
+chi2, p_srm = stats.chisquare(counts.values, f_exp=[len(df)/2, len(df)/2])  
+print(f"SRM p 值: {p_srm:.4f}")
+```
+
+p < 0.001 通常视为严重 SRM，要排查分流逻辑；p 在 0.001–0.05 之间要警惕；p > 0.05 视为通过
+
+在代码输出结果中可以观察到p值为 0.0001 ，显然是需要排查分流逻辑的
+
+**（2）基线均衡性检查**
+
+两组在实验前的特征应该接近。检查渠道、设备分布：
+
+```python
+print(pd.crosstab(df["group"], df["channel"], normalize="index").round(3))
+print(pd.crosstab(df["group"], df["device"], normalize="index").round(3))
+```
+
+输出结果如下：
+
+channel      App     PC    小程序
+group                         
+control       0.449  0.196  0.356
+treatment   0.601  0.149  0.250
+
+device         Android    Web    iOS
+group                           
+control        0.407        0.196   0.396
+treatment    0.401        0.198   0.401
+
+**如果渠道分布差异大**（这份数据就是），后面做整体对比时要警惕辛普森悖论。
+
+**（3）核心分析：主指标转化率**
+
+**（1）描述统计 + 置信区间**
+
+```python
+summary = df.groupby("group")["converted"].agg(["count", "sum", "mean"])
+summary.columns = ["users", "converted", "rate"]
+summary["se"] = (summary["rate"] * (1 - summary["rate"]) / summary["users"]) ** 0.5
+summary["ci_low"] = summary["rate"] - 1.96 * summary["se"]
+summary["ci_high"] = summary["rate"] + 1.96 * summary["se"]
+print(summary.round(4))
+```
+
+**怎么读**：先看两组的 rate 和 CI 有没有重叠。重叠多，差异可能不显著；不重叠，差异更可信。
+
+### 5.2 两比例 z 检验
+
+```python
+from statsmodels.stats.proportion import proportions_ztest
+
+ctrl = df[df["group"] == "control"]["converted"]
+trt = df[df["group"] == "treatment"]["converted"]
+
+count = [trt.sum(), ctrl.sum()]
+nobs = [len(trt), len(ctrl)]
+z_stat, p_value = proportions_ztest(count, nobs, alternative="two-sided")
+print(f"z = {z_stat:.3f}, p = {p_value:.4f}")
+```
+
+**输出解读**：p < 0.05 → 拒绝“无差异”；但还要看方向和效应量。
+
+### 5.3 效应量：绝对提升、相对提升、Cohen's h
+
+```python
+import numpy as np
+
+p_ctrl = ctrl.mean()
+p_trt = trt.mean()
+abs_lift = p_trt - p_ctrl
+rel_lift = abs_lift / p_ctrl
+
+h = 2 * np.arcsin(np.sqrt(p_trt)) - 2 * np.arcsin(np.sqrt(p_ctrl))
+print(f"control: {p_ctrl:.4f}, treatment: {p_trt:.4f}")
+print(f"绝对提升: {abs_lift*100:.2f} pp, 相对提升: {rel_lift*100:.2f}%")
+print(f"Cohen's h: {h:.3f}")
+```
+
+**判断标准**：Cohen's h 0.2 小、0.5 中、0.8 大；业务上通常看相对提升是否 ≥ 5%。
+
+### 5.4 差异的置信区间
+
+比 p 值更有信息量的是**差异本身的 CI**：
+
+```python
+se_diff = np.sqrt(p_ctrl*(1-p_ctrl)/len(ctrl) + p_trt*(1-p_trt)/len(trt))
+diff = p_trt - p_ctrl
+ci_low = diff - 1.96 * se_diff
+ci_high = diff + 1.96 * se_diff
+print(f"差异 {diff*100:.2f} pp, 95% CI [{ci_low*100:.2f}, {ci_high*100:.2f}] pp")
+```
+
+**怎么读**：如果 CI 跨 0，说明差异不显著；如果 CI 下界大于业务最小可接受提升（比如 1pp），才值得上线。
+
+### 5.5 主指标结论模板
+
+> 主指标支付转化率：control 为 X%，treatment 为 Y%，绝对提升 Z pp，相对提升 W%。两比例 z 检验 p = P，差异 95% CI 为 [a, b] pp。Cohen's h = H，属于 [小/中/大] 效应。按决策规则（相对提升 ≥5% 且 p<0.05），主指标 [达标/未达标]。
+
+---
+
+## 6. 次要指标：客单价与“显著但没用”
+
+### 6.1 只看支付用户的客单价
+
+```python
+paid = df[df["converted"] == 1]
+aov = paid.groupby("group")["amount"].agg(["count", "mean", "std"])
+print(aov.round(2))
+```
+
+### 6.2 独立样本 t 检验
+
+```python
+from scipy import stats
+
+a_ctrl = paid[paid["group"] == "control"]["amount"]
+a_trt = paid[paid["group"] == "treatment"]["amount"]
+t_stat, p_t = stats.ttest_ind(a_trt, a_ctrl, equal_var=False)
+print(f"t = {t_stat:.3f}, p = {p_t:.4f}")
+```
+
+### 6.3 效应量 Cohen's d
+
+```python
+n1, n2 = len(a_trt), len(a_ctrl)
+s_pooled = np.sqrt(((n1-1)*a_trt.std()**2 + (n2-1)*a_ctrl.std()**2) / (n1+n2-2))
+d = (a_trt.mean() - a_ctrl.mean()) / s_pooled
+print(f"均值差: {a_trt.mean()-a_ctrl.mean():.2f} 元, Cohen's d = {d:.3f}")
+```
+
+**教学点**：这份数据里客单价可能 p < 0.05，但 Cohen's d 很小（约 0.08），只高 8 元。**这就是“统计显著但业务不显著”的典型**。结论要写“差异在统计上可信，但效应量小，单独不足以支撑上线决策”。
+
+### 6.4 非参数检验（可选）
+
+金额右偏时，t 检验可能不稳，用 Mann-Whitney U 做稳健性检查：
+
+```python
+u_stat, p_u = stats.mannwhitneyu(a_trt, a_ctrl, alternative="two-sided")
+print(f"Mann-Whitney p = {p_u:.4f}")
+```
+
+如果 t 检验和 Mann-Whitney 结论一致，更可信；不一致，说明结果受分布假设影响，要谨慎。
+
+---
+
+## 7. 分层分析：识破辛普森悖论
+
+整体 treatment 转化率高，但分渠道看可能每个渠道都低。这就是**辛普森悖论**：渠道结构变化掩盖了真实效果。
+
+```python
+by_channel = df.groupby(["channel", "group"])["converted"].agg(["count", "mean"]).unstack()
+print(by_channel.round(4))
+
+# 分渠道做 z 检验
+for ch in df["channel"].unique():
+    sub = df[df["channel"] == ch]
+    c = sub[sub["group"] == "control"]["converted"]
+    t = sub[sub["group"] == "treatment"]["converted"]
+    _, p = proportions_ztest([t.sum(), c.sum()], [len(t), len(c)])
+    print(f"{ch}: control {c.mean():.3f}, treatment {t.mean():.3f}, p={p:.4f}, n={len(sub)}")
+```
+
+**怎么读**：
+- 如果整体提升但每个渠道都下降 → 提升来自“treatment 组 App 用户占比更高”，不是改版本身有效；
+- 正确结论应基于**分层后的加权效果**，或直接说“整体提升不可归因于改版”。
+
+**结论模板**：
+> 整体转化率 treatment 高于 control，但分渠道看，App/小程序/PC 三个渠道内 treatment 均略低于 control。整体提升主要由 treatment 组 App 用户占比更高（X% vs Y%）驱动，存在辛普森悖论。不能将整体提升归因于改版，需按渠道分层评估或做分流比例校正。
+
+---
+
+## 8. 时间趋势：识别新奇效应
+
+```python
+daily = df.groupby(["day_idx", "group"])["converted"].mean().unstack()
+daily.plot(marker="o", title="分日转化率")
+```
+
+**怎么读**：
+- 前 3 天 treatment 明显高、之后回落 → 新奇效应，长期效果可能不存在；
+- 两组曲线平行 → 效果稳定；
+- 某天突然跳变 → 查当天是否有活动或数据问题。
+
+**结论模板**：
+> 分日看，treatment 在前 3 天转化率高出 X pp，第 4 天起回落至与 control 接近。提示存在新奇效应，14 天整体提升可能高估长期效果，建议延长实验或剔除前 3 天重算。
+
+---
+
+## 9. 留存对比：护栏指标
+
+Week 2 的留存口径直接用在这里，只是**按实验组拆分**。
+
+```python
+# D1 / D7 留存率
+ret = df.groupby("group")[["active_d1", "active_d7"]].mean()
+print(ret.round(4))
+
+# 两比例检验
+for col in ["active_d1", "active_d7"]:
+    c = df[df["group"] == "control"][col]
+    t = df[df["group"] == "treatment"][col]
+    _, p = proportions_ztest([t.sum(), c.sum()], [len(t), len(c)])
+    print(f"{col}: control {c.mean():.3f}, treatment {t.mean():.3f}, p={p:.4f}")
+```
+
+**判断**：护栏指标不要求提升，只要求**不显著下降**。如果 treatment 留存显著更低，即使主指标提升，也要谨慎上线。
+
+**结论模板**：
+> D1 留存 control X%、treatment Y%，p=P；D7 留存 control A%、treatment B%，p=Q。护栏指标 [未出现显著下降/出现显著下降]，[支持/不支持] 上线。
+
+---
+
+## 10. 多重比较：看了 5 个指标，1 个显著是偶然吗
+
+如果你同时检验了转化率、客单价、D1、D7、点击率 5 个指标，每个用 α=0.05，**至少一个假阳性的概率约 1-(0.95)^5 ≈ 23%**。
+
+**Bonferroni 校正**：把 α 除以检验次数。
+
+```python
+from statsmodels.stats.multitest import multipletests
+
+p_values = [p_value, p_t, p_d1, p_d7]   # 你所有检验的 p 值
+reject, p_adj, _, _ = multipletests(p_values, alpha=0.05, method="bonferroni")
+print("校正后 p:", p_adj.round(4))
+print("是否显著:", reject)
+```
+
+**教学点**：主指标可以单独看，但次要指标和分层分析要校正，否则容易“挑出一个显著的就说有效”。
+
+---
+
+## 11. 实验评估报告模板
+
+```markdown
+# A/B 实验评估报告：商品详情页改版
+
+## 1. 结论先行
+主指标支付转化率 treatment 相对提升 X%，p=P，95% CI [a,b] pp，[达到/未达到] 上线标准。
+但分渠道存在辛普森悖论 / 前 3 天存在新奇效应，整体提升 [可/不可] 归因于改版。
+建议：[上线 / 不上线 / 延长实验 / 修正分流后重跑]。
+
+## 2. 实验设计
+- 假设、主指标、次要指标、护栏指标
+- 样本量、实验周期、分流方式
+- 决策规则
+
+## 3. 实验前检查
+- SRM：两组人数 X/Y，卡方 p=P，[通过/未通过]
+- 基线：渠道分布差异 [大/小]，设备分布 [均衡/不均衡]
+
+## 4. 主指标结果
+- 描述统计 + 95% CI
+- z 检验 p 值
+- 绝对/相对提升、Cohen's h
+- 结论：统计显著？业务显著？
+
+## 5. 次要指标与护栏指标
+- 客单价：均值差、p 值、Cohen's d，是否“显著但效应小”
+- D1/D7 留存：是否显著下降
+
+## 6. 分层与时间趋势
+- 分渠道转化率：是否存在辛普森悖论
+- 分日转化率：是否存在新奇效应
+
+## 7. 多重比较
+- 检验了几个指标，是否做 Bonferroni 校正
+
+## 8. 建议
+- 上线/不上线/延长实验
+- 需要补充的数据或实验
+
+## 9. 局限
+- 样本量、实验周期
+- 新奇效应、辛普森悖论
+- 未覆盖的指标（如长期留存、退款率）
+- 统计显著不等于业务显著
+```
+
+---
+
+## 12. 常见坑清单（Week 3 重点）
+
+| 坑 | 后果 | 正确做法 |
+|---|---|---|
+| 把 p 值当“原假设为真的概率” | 解读全错 | p 是“H0 下观察到当前结果的概率” |
+| 只看 p 值不看效应量 | 上线一个“显著但没用”的改动 | 同时看绝对/相对提升和 Cohen's d/h |
+| 不检查 SRM | 分流有问题，结论不可信 | 实验前做卡方拟合优度检验 |
+| 整体提升就归因于改版 | 可能是辛普森悖论 | 分层分析，看每个渠道内部效果 |
+| 前 3 天效果好就下结论 | 新奇效应高估长期效果 | 看分日趋势，延长实验 |
+| 多重比较不校正 | 假阳性率飙升 | Bonferroni 或 FDR 校正 |
+| 偷看数据提前停止 | α 膨胀，假阳性增加 | 固定样本量或实验周期 |
+| 实验周期不完整 | 未覆盖完整周，受周内效应影响 | 至少覆盖 1–2 个完整周 |
+| 护栏指标不看 | 主指标提升但留存下降 | 护栏指标不显著下降才上线 |
+| 事后算功效 | 没有意义 | 样本量在实验前算 |
+
+---
+
+## 13. 交付物与检查清单
+
+**交付物**
+1. `week3_ab_test.ipynb`：数据加载、前检查、主指标、次要指标、分层、时间趋势、留存、多重比较；
+2. `ab_report.md` 或 PDF：按第 11 节模板写；
+3. `统计错题本.md`：记录至少 5 个容易犯的统计错误。
+
+**检查清单**
+- [ ] 实验设计写在分析之前了吗？
+- [ ] SRM 检查做了吗？结论是什么？
+- [ ] 主指标给了 CI 和效应量，不只 p 值？
+- [ ] 次要指标区分了“统计显著”和“业务显著”？
+- [ ] 分层分析发现辛普森悖论了吗？
+- [ ] 时间趋势看了新奇效应吗？
+- [ ] 护栏指标检验了吗？
+- [ ] 多重比较校正了吗？
+- [ ] 报告结论能落到“上线/不上线/延长实验”吗？
+- [ ] 局限写清楚了吗？
+
+---
+
+## 14. 一周节奏建议
+
+| 天 | 内容 |
+|---|---|
+| 周一 | 读第 2 节统计基础；跑数据生成脚本；写实验设计 |
+| 周二 | SRM + 基线检查；主指标描述统计 + CI + z 检验 |
+| 周三 | 效应量；次要指标 t 检验 + Cohen's d；多重比较校正 |
+| 周四 | 分层分析（辛普森悖论）；分日趋势（新奇效应）；留存护栏 |
+| 周五 | 写实验评估报告 |
+| 周六 | 复盘：哪个统计概念没吃透，记进错题本 |
+| 周日 | 补 Week 2 遗留问题，或重跑一个指标验证 |
+
+---
+
+## 15. 三个自检问题（Week 3 结束时问自己）
+
+1. **p 值、置信区间、效应量，我能用一句话分别说清它们回答什么问题吗？**
+2. **看到“显著提升”，我会先问“提升多大、样本够不够、有没有分层悖论”吗？**
+3. **我的结论能直接支持一个上线/不上线的决策吗，还是只说了“有差异”？**
+
+---
+
+Week 3 的难点不在代码，在**判断力**：p 值显著不等于值得上线，整体提升不等于改版有效。这份数据里的四个陷阱，就是专门练这个的。
+
+建议你先跑数据生成脚本，把 `groupby("group")` 的输出贴给我，我帮你确认 SRM 和整体转化率是否符合设计预期，再往下做检验。
