@@ -1738,3 +1738,492 @@ print("是否显著:", reject)
 ```
 
 **教学点**：主指标可以单独看，但次要指标和分层分析要校正，否则容易“挑出一个显著的就说有效”。
+
+
+# 最后整理
+
+Week 4 的核心不是学新方法，而是**把 Week 1–3 的碎片整合成一个可展示、可复现、能讲清楚的项目**。前面你练的是“单点技能”，Week 4 练的是“工程组织 + 表达 + 包装”。
+
+## 0. Week 4 要解决什么问题
+
+| 前几周的状态 | Week 4 的目标 |
+|---|---|
+| SQL 在一个 `.sql` 文件里，Pandas 在几个 notebook 里 | 统一成一个有目录结构的项目 |
+| 分析结果散落在 cell 输出里 | 固化成可重复运行的脚本和报告 |
+| 结论写在 notebook 的 markdown 里 | 提炼成一页可交付的分析报告 |
+| 图是临时画的 | 做成可交互的 Dashboard |
+| 别人不知道怎么跑 | 写 README，别人能按步骤复现 |
+
+**一句话**：Week 4 的交付物是**一个别人能看懂、能跑通、能拿去面试讲的项目**。
+
+## 1. 项目选题：把前三周串起来
+
+推荐题目：**电商用户行为分析与转化优化**
+
+这个题目能自然覆盖：
+
+- **Week 1**：订单宽表、GMV/客单价/分组对比；
+- **Week 2**：行为事件清洗、漏斗、留存、相关性；
+- **Week 3**：A/B 测试评估、统计判断；
+- **Week 4**：ETL 管道 + 分析报告 + Dashboard。
+
+如果你不想用模拟数据，也可以换成公开数据集（Kaggle 的 e-commerce behavior data、Brazilian E-Commerce Public Dataset），但**建议先用你已有的三份数据跑通流程**，再考虑换数据。
+
+## 2. 项目目录结构
+
+在 `data_analysis_portfolio/` 下建这样的结构：
+
+```
+data_analysis_portfolio/
+├── README.md
+├── requirements.txt
+├── data/
+│   ├── raw/                  # 原始数据，只读
+│   │   ├── events.csv
+│   │   ├── orders.csv
+│   │   ├── users.csv
+│   │   └── ab_experiment.csv
+│   └── processed/            # 清洗后数据
+│       ├── events_clean.parquet
+│       ├── dw_order_wide.parquet
+│       └── ab_clean.parquet
+├── sql/
+│   ├── 01_create_tables.sql
+│   ├── 02_load_seed_data.sql
+│   └── 03_analysis_queries.sql
+├── src/
+│   ├── etl/
+│   │   ├── extract.py
+│   │   ├── transform.py
+│   │   └── load.py
+│   ├── analysis/
+│   │   ├── funnel.py
+│   │   ├── retention.py
+│   │   ├── correlation.py
+│   │   └── ab_test.py
+│   └── utils/
+│       ├── db.py
+│       └── io.py
+├── notebooks/
+│   ├── 01_eda.ipynb
+│   ├── 02_funnel_retention.ipynb
+│   └── 03_ab_test.ipynb
+├── dashboard/
+│   └── app.py
+├── reports/
+│   ├── figures/
+│   └── final_report.md
+└── run_pipeline.py
+```
+
+**教学点**：
+
+- `data/raw` 只读，`data/processed` 可覆盖，避免“原始数据被改坏”；
+- `src/` 放可复用函数，`notebooks/` 只做探索和展示；
+- `run_pipeline.py` 是一键入口，别人只需要跑这一个文件。
+
+## 3. ETL 管道：拆成 Extract / Transform / Load
+
+### 3.1 为什么拆成三个文件
+
+- **可测试**：每个环节可以单独跑、单独验证；
+- **可替换**：数据源从 CSV 换成数据库，只改 `extract.py`；
+- **可读**：别人看目录就知道流程。
+
+### 3.2 `extract.py`：只负责读数据
+
+```python
+import pandas as pd
+from pathlib import Path
+
+RAW = Path("data/raw")
+
+def extract_events():
+    return pd.read_csv(RAW / "events.csv", encoding="utf-8-sig")
+
+def extract_orders():
+    return pd.read_csv(RAW / "orders.csv", encoding="utf-8-sig")
+
+def extract_users():
+    return pd.read_csv(RAW / "users.csv", encoding="utf-8-sig")
+
+def extract_ab():
+    return pd.read_csv(RAW / "ab_experiment.csv", encoding="utf-8-sig")
+
+def extract_all():
+    return {
+        "events": extract_events(),
+        "orders": extract_orders(),
+        "users": extract_users(),
+        "ab": extract_ab(),
+    }
+```
+
+**教学点**：Extract 层**不做任何清洗**。它的职责只有“把数据读进来”，这样出问题容易定位是“读错了”还是“洗错了”。
+
+### 3.3 `transform.py`：清洗和派生
+
+把 Week 2 的清洗逻辑封装成函数：
+
+```python
+import pandas as pd
+
+VALID_EVENTS = {"exposure", "click", "add_cart", "order", "pay"}
+VALID_CHANNELS = {"App", "小程序", "PC"}
+
+def clean_events(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.drop_duplicates(subset=["event_id"]).copy()
+
+    df["event_type"] = (
+        df["event_type"].astype(str).str.strip().str.lower()
+        .where(lambda s: s.isin(VALID_EVENTS), "unknown")
+    )
+    channel_map = {"app": "App", "pc": "PC", "web": "PC", "小程序": "小程序"}
+    df["channel"] = (
+        df["channel"].astype(str).str.strip()
+        .replace(channel_map)
+        .where(lambda s: s.isin(VALID_CHANNELS), "unknown")
+    )
+
+    df["event_time"] = pd.to_datetime(df["event_time"], errors="coerce")
+    df = df.dropna(subset=["event_time"]).copy()
+
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
+    df["user_id"] = df["user_id"].astype(str)
+    df["event_id"] = df["event_id"].astype(str)
+
+    df["date"] = df["event_time"].dt.normalize()
+    df["hour"] = df["event_time"].dt.hour
+    df["dow"] = df["event_time"].dt.dayofweek
+    df["week"] = df["event_time"].dt.to_period("W").astype(str)
+
+    return df
+
+
+def build_user_features(events: pd.DataFrame) -> pd.DataFrame:
+    user = events.groupby("user_id").agg(
+        events=("event_id", "count"),
+        active_days=("date", "nunique"),
+        pay_cnt=("event_type", lambda s: (s == "pay").sum()),
+        gmv=("amount", "sum"),
+        first_time=("event_time", "min"),
+        last_time=("event_time", "max"),
+    ).reset_index()
+    user["life_days"] = (user["last_time"] - user["first_time"]).dt.days + 1
+    user["pay_rate"] = user["pay_cnt"] / user["events"]
+    return user
+```
+
+**教学点**：Transform 层**每个函数只做一件事**，输入 DataFrame，输出 DataFrame。不要在里面读文件、画图、写报告。
+
+### 3.4 `load.py`：写出干净数据
+
+```python
+import pandas as pd
+from pathlib import Path
+
+PROCESSED = Path("data/processed")
+PROCESSED.mkdir(parents=True, exist_ok=True)
+
+def save_parquet(df: pd.DataFrame, name: str):
+    df.to_parquet(PROCESSED / f"{name}.parquet", index=False)
+    print(f"saved {name}.parquet, shape={df.shape}")
+```
+
+**教学点**：中间结果用 **Parquet**，保留类型；给业务方看的才导出 CSV。
+
+### 3.5 `run_pipeline.py`：一键跑通
+
+```python
+from src.etl.extract import extract_all
+from src.etl.transform import clean_events, build_user_features
+from src.etl.load import save_parquet
+
+def main():
+    raw = extract_all()
+
+    events_clean = clean_events(raw["events"])
+    user_features = build_user_features(events_clean)
+
+    save_parquet(events_clean, "events_clean")
+    save_parquet(user_features, "user_features")
+
+    print("pipeline done")
+
+if __name__ == "__main__":
+    main()
+```
+
+**检查点**：别人 clone 你的项目后，只需要 `pip install -r requirements.txt` + `python run_pipeline.py`，就能生成 `data/processed/` 下的文件。
+
+## 4. 分析模块：把 Week 2/3 的方法函数化
+
+### 4.1 `funnel.py`
+
+```python
+import pandas as pd
+
+STEPS = ["exposure", "click", "add_cart", "order", "pay"]
+
+def overall_funnel(events: pd.DataFrame) -> pd.DataFrame:
+    f = events.groupby("event_type")["user_id"].nunique().reindex(STEPS).fillna(0)
+    out = pd.DataFrame({"step": STEPS, "users": f.values})
+    out["step_rate"] = out["users"] / out["users"].shift(1)
+    out["overall_rate"] = out["users"] / out["users"].iloc[0]
+    return out
+
+def funnel_by_channel(events: pd.DataFrame) -> pd.DataFrame:
+    f = (events.groupby(["channel", "event_type"])["user_id"]
+         .nunique().unstack().reindex(columns=STEPS).fillna(0))
+    return f.div(f["exposure"], axis=0).round(3)
+```
+
+### 4.2 `retention.py`
+
+把 Week 2 的区间留存和周留存封装：
+
+```python
+import pandas as pd
+
+def build_cohort(events: pd.DataFrame) -> pd.DataFrame:
+    first = events.groupby("user_id", as_index=False)["event_time"].min()
+    first.columns = ["user_id", "first_time"]
+    first["cohort"] = first["first_time"].dt.to_period("W").astype(str)
+    df = events.merge(first, on="user_id", how="left")
+    df["day_diff"] = (df["date"] - df["first_time"].dt.normalize()).dt.days
+    df["week_diff"] = df["day_diff"] // 7
+    return df
+
+def retention_range(df: pd.DataFrame, start: int, end: int) -> pd.Series:
+    cohort_size = df.groupby("cohort")["user_id"].nunique()
+    active = (df[(df["day_diff"] >= start) & (df["day_diff"] <= end)]
+              .groupby("cohort")["user_id"].nunique())
+    return (active / cohort_size).fillna(0).round(3)
+```
+
+### 4.3 `ab_test.py`
+
+把 Week 3 的检验封装成函数，返回字典，方便报告引用：
+
+```python
+import numpy as np
+from statsmodels.stats.proportion import proportions_ztest
+
+def compare_conversion(df, group_col="group", metric="converted"):
+    ctrl = df[df[group_col] == "control"][metric]
+    trt = df[df[group_col] == "treatment"][metric]
+    z, p = proportions_ztest([trt.sum(), ctrl.sum()], [len(trt), len(ctrl)])
+    p1, p2 = ctrl.mean(), trt.mean()
+    se = np.sqrt(p1*(1-p1)/len(ctrl) + p2*(1-p2)/len(trt))
+    return {
+        "control_rate": round(p1, 4),
+        "treatment_rate": round(p2, 4),
+        "abs_lift_pp": round((p2 - p1) * 100, 2),
+        "rel_lift_pct": round((p2 - p1) / p1 * 100, 2),
+        "p_value": round(p, 4),
+        "ci_low_pp": round((p2 - p1 - 1.96 * se) * 100, 2),
+        "ci_high_pp": round((p2 - p1 + 1.96 * se) * 100, 2),
+    }
+```
+
+**教学点**：分析函数**返回结构化结果**（dict / DataFrame），不要在函数里 `print` 或 `plt.show()`。展示留给 notebook 和 Dashboard。
+
+## 5. Notebook：只做探索和讲故事
+
+`notebooks/` 里的 notebook 不重复写清洗逻辑，只调用 `src/` 里的函数：
+
+```python
+from src.etl.extract import extract_all
+from src.etl.transform import clean_events, build_user_features
+from src.analysis.funnel import overall_funnel
+
+raw = extract_all()
+events = clean_events(raw["events"])
+funnel = overall_funnel(events)
+funnel
+```
+
+**教学点**：notebook 是“展示层”，`src/` 是“逻辑层”。这样别人读 notebook 能看懂故事，读 `src/` 能复用代码。
+
+**notebook 分工建议**：
+
+| notebook | 内容 | 对应周 |
+|---|---|---|
+| `01_eda.ipynb` | 数据概览、描述统计、地区品类交叉 | Week 1 |
+| `02_funnel_retention.ipynb` | 漏斗、留存、相关性 | Week 2 |
+| `03_ab_test.ipynb` | SRM、主指标、分层、新奇效应、护栏 | Week 3 |
+
+## 6. Dashboard：把关键图做成可交互页面
+
+推荐 **Streamlit**，最简单，几十行代码就能跑。
+
+### 6.1 安装
+
+```bash
+pip install streamlit plotly
+```
+
+### 6.2 `dashboard/app.py` 骨架
+
+```python
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from pathlib import Path
+
+st.set_page_config(page_title="电商用户行为分析", layout="wide")
+st.title("电商用户行为分析与转化优化")
+
+@st.cache_data
+def load_data():
+    events = pd.read_parquet(Path("../data/processed/events_clean.parquet"))
+    return events
+
+events = load_data()
+
+# 侧边栏筛选
+channels = st.sidebar.multiselect("渠道", events["channel"].unique(), default=list(events["channel"].unique()))
+filtered = events[events["channel"].isin(channels)]
+
+# 指标卡
+col1, col2, col3 = st.columns(3)
+col1.metric("用户数", f"{filtered['user_id'].nunique():,}")
+col2.metric("事件数", f"{len(filtered):,}")
+col3.metric("GMV", f"{filtered['amount'].sum():,.0f}")
+
+# 漏斗图
+st.subheader("转化漏斗")
+steps = ["exposure", "click", "add_cart", "order", "pay"]
+funnel = filtered.groupby("event_type")["user_id"].nunique().reindex(steps).fillna(0).reset_index()
+funnel.columns = ["step", "users"]
+fig = px.funnel(funnel, x="users", y="step")
+st.plotly_chart(fig, use_container_width=True)
+
+# 分渠道转化率
+st.subheader("分渠道支付转化率")
+ch = filtered.groupby("channel").agg(
+    users=("user_id", "nunique"),
+    pay_users=("user_id", lambda s: filtered.loc[s.index][filtered["event_type"]=="pay"]["user_id"].nunique()),
+)
+ch["pay_rate"] = ch["pay_users"] / ch["users"]
+st.bar_chart(ch["pay_rate"])
+```
+
+### 6.3 运行
+
+```bash
+cd dashboard
+streamlit run app.py
+```
+
+**教学点**：
+
+- 用 `@st.cache_data` 缓存数据，避免每次交互都重读文件；
+- 侧边栏筛选让 Dashboard 有交互感；
+- 指标卡 + 漏斗 + 分组图，三块就够，不要堆 10 张图。
+
+**Dashboard 检查清单**：
+
+- [ ] 打开后 3 秒内能看到核心指标；
+- [ ] 筛选器能改变图表；
+- [ ] 图表标题写清楚指标口径；
+- [ ] 没有报错、没有空白图。
+
+## 7. 一页分析报告
+
+`reports/final_report.md` 按这个结构写，控制在 1–2 页：
+
+**电商用户行为分析与转化优化**
+
+**结论先行**
+1. 整体曝光到支付转化率 X%，最大流失在 [环节]，环节转化率仅 Y%。
+2. App 渠道转化率最高（Z%），但 D7 留存最低（A%），存在“转化高但不留存”的问题。
+3. 详情页改版实验：主指标相对提升 B%，但分渠道存在辛普森悖论，前 3 天存在新奇效应，[建议上线/延长实验]。
+
+**关键证据**
+- 漏斗图：最大流失环节及人数
+- 留存曲线：各 cohort D1/D7 留存
+- 相关矩阵：events 与 gmv 相关系数
+- A/B 检验：p 值、置信区间、效应量
+
+**原因假设**
+- 加购到下单流失高，可能是运费/库存提示不足
+- App 转化高但留存低，可能是推送过度
+- 实验整体提升来自渠道结构偏差
+
+**建议**
+1. 优先优化 [环节] 的转化路径
+2. 对 App 渠道做留存召回
+3. 修正分流后重跑实验，或延长实验观察长期效果
+
+**局限**
+- 模拟数据，行为随机生成，结论不代表真实业务
+- 实验存在 SRM，整体对比不可直接归因
+- 未覆盖退款率、长期留存等指标
+
+**教学点**：报告不是 notebook 的复制粘贴，而是**结论 → 证据 → 建议 → 局限**。每张图只服务一个结论。
+
+
+## 8. README：让别人能跑通
+
+`README.md` 模板：
+
+**电商用户行为分析与转化优化**
+
+**项目背景**
+基于模拟的电商用户行为事件、订单和 A/B 实验数据，完成从 ETL 到分析报告和 Dashboard 的全流程。
+
+**目录结构**
+（贴第 2 节的树）
+
+**快速开始**
+```bash
+pip install -r requirements.txt
+python run_pipeline.py
+streamlit run dashboard/app.py
+
+```
+
+### 数据说明
+- `data/raw/events.csv`：用户行为事件，字段说明见 docs
+- `data/raw/ab_experiment.csv`：A/B 实验数据
+- 清洗后数据在 `data/processed/`
+
+### 分析结论摘要
+（贴报告的三条结论）
+
+### 技术栈
+Python / Pandas / MySQL / statsmodels / Streamlit / Plotly
+
+**教学点**：README 是别人打开你项目的第一个文件。**能按 README 跑通**，项目才算完成。
+
+## 9. `requirements.txt`
+
+```txt
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+seaborn>=0.12
+scipy>=1.10
+statsmodels>=0.14
+sqlalchemy>=2.0
+pymysql>=1.1
+pyarrow>=14.0
+streamlit>=1.30
+plotly>=5.18
+```
+
+**教学点**：写最低版本，不要 `pip freeze` 一堆本地依赖。别人装的时候出问题，至少知道是哪个包的版本
+
+## 10. 交付物清单
+
+| 交付物 | 路径 | 检查标准 |
+|---|---|---|
+| ETL 脚本 | `src/etl/` | 三个文件职责清晰，能单独跑 |
+| 一键入口 | `run_pipeline.py` | 跑完生成 `data/processed/` |
+| 分析函数 | `src/analysis/` | 返回结构化结果，不 print |
+| 分析 notebook | `notebooks/` | 调用 src，不重复清洗逻辑 |
+| Dashboard | `dashboard/app.py` | 能筛选、有 3 类图、无报错 |
+| 分析报告 | `reports/final_report.md` | 结论先行、有证据、有局限 |
+| README | `README.md` | 别人能按步骤跑通 |
+| 依赖文件 | `requirements.txt` | 版本明确 |
